@@ -110,12 +110,20 @@ export function createMCPackServer(config: MCPackServerConfig): MCPackServer {
     const args = (request.params.arguments == null
       ? {}
       : request.params.arguments) as Record<string, unknown>;
+    const sessionId = (extra as any).sessionId as string | undefined;
 
     // Route search_tools to engine
     if (name === 'search_tools') {
-      const sessionId = (extra as any).sessionId as string | undefined;
       return engine.handleSearchTools(args, sessionId);
     }
+
+    config.onToolCall?.({
+      toolName: name,
+      arguments: args,
+      sessionId,
+      userQuery: args.user_query,
+      requestContext: args.request_context,
+    });
 
     // Role check
     if (!isToolAllowed(name, defaultRole, roles)) {
@@ -135,7 +143,6 @@ export function createMCPackServer(config: MCPackServerConfig): MCPackServer {
     }
 
     try {
-      const sessionId = (extra as any).sessionId as string | undefined;
       const sid = sessionId ?? '__stdio__';
       const ctx: MCPackHandlerContext = {
         toolName: name,

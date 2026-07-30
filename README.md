@@ -1,5 +1,100 @@
 # MCPack
 
+## Policy Gateway POC
+
+The Policy Gateway POC currently provides the local scaffold, a health endpoint, a transport-neutral deterministic policy evaluator, guarded mock execution, an in-memory human approval workflow, and replaceable sanitized lifecycle auditing. Real MCP integration and output redaction are not implemented yet.
+
+The policy evaluator supports subject matching, exact or wildcard tool matching, deterministic argument equality conditions, priority ordering, safe effect precedence for ties, and default denial. Sample policies live in `src/policy/sample-policies.ts`.
+
+### Requirements
+
+- Node.js 22 or newer
+- npm
+
+### Local setup
+
+```bash
+npm install
+npm run dev
+```
+
+The development server binds to `127.0.0.1:3000` by default. Verify it with:
+
+```bash
+curl http://127.0.0.1:3000/health
+```
+
+Expected response:
+
+```json
+{
+  "status": "ok"
+}
+```
+
+### Guarded mock tool calls
+
+`POST /v1/tools/call` validates the untrusted test request, evaluates deterministic local policy, and executes a mock tool only when the decision is `allow`.
+
+```bash
+curl -X POST http://127.0.0.1:3000/v1/tools/call \
+  -H "content-type: application/json" \
+  -d '{
+    "requestId": "req-001",
+    "userId": "user-001",
+    "userRole": "support-agent",
+    "agentId": "support-agent-01",
+    "toolName": "tickets.search",
+    "arguments": {
+      "query": "payment failed"
+    }
+  }'
+```
+
+The available deterministic mock implementations are `tickets.search`, `customers.get`, and `refunds.execute`. The current sample policy allows support agents to search tickets, denies support-agent refunds, and marks billing-agent refunds as requiring approval.
+
+### Local approvals
+
+Billing-agent refund calls return an `approvalId` and remain pending. Approval identity is explicitly untrusted test context: only a request body declaring `reviewerRole: "team-lead"` may approve or reject.
+
+```bash
+curl -X POST http://127.0.0.1:3000/v1/approvals/APPROVAL_ID/approve \
+  -H "content-type: application/json" \
+  -d '{"reviewedBy":"lead-001","reviewerRole":"team-lead"}'
+
+curl -X POST http://127.0.0.1:3000/v1/approvals/APPROVAL_ID/execute
+```
+
+Approvals are held only in process memory and disappear when the server restarts. Approved mock calls execute at most once.
+
+### Audit integration
+
+Gateway and approval services emit standardized `AuditEvent` objects through the transport-neutral `AuditSink` interface:
+
+```ts
+interface AuditSink {
+  emit(event: AuditEvent): Promise<void>;
+}
+```
+
+`InMemoryAuditSink` is the local demonstration and test adapter. Zaid's audit tool can replace it by implementing this one interface and passing that adapter to `buildApp({ auditSink })`; policy, approval, and execution logic do not need to change.
+
+Audit arguments and result summaries recursively replace fields named `password`, `token`, `secret`, `authorization`, or `email` with `[REDACTED]`. This is deterministic field-name sanitization for the POC, not semantic secret detection.
+
+Required audit delivery is fail-closed before tool execution. If receipt, decision, approval-creation, or execution-start delivery fails, the operation returns an error and the tool does not run. If success-event delivery fails after a mock tool has already completed, the API returns an audit error; approved calls remain marked `executed` to prevent duplicate execution. Failed tool execution attempts produce a failure event when the sink is available.
+
+Run the complete local scenario with:
+
+```bash
+npm run demo
+```
+
+The demo prints allow, deny, approval, and approved execution responses followed by the sanitized audit events.
+
+Intentionally excluded from this POC are audit databases, dashboards, durable or production storage, complex audit-search APIs, immutable ledgers, production authentication, real MCP integration, external databases, and real external side effects. In-memory audit events and approvals disappear when the process exits.
+
+Optional local settings are documented in `.env.example`. This POC does not load `.env` files automatically; provide values through the process environment if needed.
+
 RBAC for MCP servers. Drop-in role-based access control for any MCP server — agents only see the tools their role permits.
 
 Built for a venture studio that needed to give co-founders and partners agent-level access to a shared stack without building another admin dashboard. Their Claude session becomes a terminal into the shared venture, scoped to what they should actually be able to touch.

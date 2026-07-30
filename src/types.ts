@@ -11,6 +11,7 @@ export interface MCPackConfig {
   defaultRole?: string;
   index?: IndexConfig;
   session?: SessionConfig;
+  onToolCall?: (observation: MCPackToolCallObservation) => void;
 }
 
 /**
@@ -30,6 +31,17 @@ export interface MCPackHandlerContext {
   toolName: string;
   sessionId: string;
   role: string | undefined;
+}
+
+/**
+ * Minimal observation hook for tool-call context experiments.
+ */
+export interface MCPackToolCallObservation {
+  toolName: string;
+  arguments: Record<string, unknown>;
+  sessionId: string | undefined;
+  userQuery?: unknown;
+  requestContext?: unknown;
 }
 
 /**

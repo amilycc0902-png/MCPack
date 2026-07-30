@@ -2,6 +2,10 @@ node_modules/
 dist/
 *.tsbuildinfo
 coverage/
+.env
+.env.*
+!.env.example
+*.log
 test/harness/report.json
 
 # Loom Labs local configs
