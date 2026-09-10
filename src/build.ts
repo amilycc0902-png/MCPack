@@ -1,83 +1,40 @@
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
-  ListToolsRequestSchema,
-  CallToolRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+  Server,
+  createMcpHandler,
+  type CallToolRequest,
+  type Implementation,
+  type ServerContext,
+  type Tool,
+} from '@modelcontextprotocol/server';
 import type {
+  MCPackHandlerContext,
   MCPackServerConfig,
   MCPackServer,
-  MCPackHandlerContext,
-  ToolCallResult,
 } from './types.js';
 import { MCPackEngine } from './core.js';
 import { isToolAllowed } from './roles.js';
+import { protocolContextFromServerContext } from './mcp/protocol.js';
+import { normalizeMCPResult } from './mcp/result.js';
 
-// NOTE: Uses low-level Server class. The SDK marks Server as @deprecated
-// in favor of McpServer, but MCPack requires setRequestHandler() for
-// handler interception, which McpServer does not expose.
-
-// ─── Helpers ────────────────────────────────────────────────────────────────────
-
-function normalizeResult(value: unknown): any {
-  if (value == null) {
-    return { content: [{ type: 'text', text: '' }] };
-  }
-  if (typeof value === 'string') {
-    return { content: [{ type: 'text', text: value }] };
-  }
-  if (
-    typeof value === 'object' &&
-    'content' in value &&
-    Array.isArray((value as any).content)
-  ) {
-    return value as ToolCallResult;
-  }
-  return { content: [{ type: 'text', text: JSON.stringify(value) }] };
-}
-
-// ─── Entry Point ────────────────────────────────────────────────────────────────
-
-/**
- * Create a new MCP Server with lazy tool discovery.
- *
- * Builds an MCP SDK Server from scratch, registers tool handlers via a
- * dispatch map, and wraps them with MCPack's search-first discovery layer.
- *
- * @param config - Server identity, tool definitions, and optional MCPack settings
- * @returns MCPackServer with `server` (connect to transport) and `handle` (lifecycle)
- */
+/** Create a stateless MCP 2026-07-28-compatible build-mode server. */
 export function createMCPackServer(config: MCPackServerConfig): MCPackServer {
-  // 1. Runtime validation
-  if (!config.name) {
-    throw new Error('MCPack: config.name is required');
-  }
-  if (!config.version) {
-    throw new Error('MCPack: config.version is required');
-  }
-  if (!config.tools || config.tools.length === 0) {
-    throw new Error(
-      'MCPack: config.tools is empty. Provide at least one tool definition.',
-    );
-  }
+  validateConfig(config);
 
-  // 2. Snapshot mutable config
   const roles = config.roles ? { ...config.roles } : undefined;
   const defaultRole = config.defaultRole;
+  const serverInfo: Implementation = { name: config.name, version: config.version };
 
-  // 3. defaultRole validation
   if (defaultRole && roles && !roles[defaultRole]) {
     console.warn(
-      `MCPack: defaultRole "${defaultRole}" is not defined in roles config. Sessions will see no tools.`,
+      `MCPack: defaultRole "${defaultRole}" is not defined in roles config. Requests will see no tools.`,
     );
   }
 
-  // 4. Build dispatch map
   const dispatch = new Map<
     string,
     (
       args: Record<string, unknown>,
-      ctx: MCPackHandlerContext,
+      context: MCPackHandlerContext,
     ) => Promise<unknown>
   >();
   for (const tool of config.tools) {
@@ -89,81 +46,100 @@ export function createMCPackServer(config: MCPackServerConfig): MCPackServer {
     dispatch.set(tool.name, tool.handler);
   }
 
-  // 5. Strip handlers and create engine
-  const tools: Tool[] = config.tools.map(({ handler, ...tool }) => tool);
-  const engine = new MCPackEngine(tools, config);
+  const tools = config.tools.map(({ handler, ...tool }) => {
+    void handler;
+    return tool;
+  }) as Tool[];
+  const engine = new MCPackEngine(tools, config, { stateless: true });
 
-  // 6. Create Server
-  const server = new Server(
-    { name: config.name, version: config.version },
-    { capabilities: { tools: {} } },
-  );
+  const buildServer = (): Server => {
+    const server = new Server(serverInfo, { capabilities: { tools: {} } });
 
-  // 7. Set tools/list handler
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return engine.handleToolsList();
-  });
+    server.setRequestHandler('tools/list', async (_request, context) => {
+      protocolContextFromServerContext(context);
+      return normalizeMCPResult(engine.handleToolsList(), serverInfo) as never;
+    });
 
-  // 8. Set tools/call handler
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    server.setRequestHandler('tools/call', async (request, context) =>
+      handleToolCall(request, context),
+    );
+
+    return server;
+  };
+
+  const handleToolCall = async (
+    request: CallToolRequest,
+    serverContext: ServerContext,
+  ): Promise<never> => {
+    const protocol = protocolContextFromServerContext(serverContext);
     const name = request.params.name;
-    const args = (request.params.arguments == null
-      ? {}
-      : request.params.arguments) as Record<string, unknown>;
+    const args = (request.params.arguments ?? {}) as Record<string, unknown>;
 
-    // Route search_tools to engine
     if (name === 'search_tools') {
-      const sessionId = (extra as any).sessionId as string | undefined;
-      return engine.handleSearchTools(args, sessionId);
+      return normalizeMCPResult(
+        engine.handleSearchToolsStateless(args),
+        serverInfo,
+      ) as never;
     }
 
-    // Role check
+    config.onToolCall?.({
+      toolName: name,
+      arguments: args,
+      ...protocol,
+      userQuery: args.user_query,
+      requestContext: args.request_context,
+    });
+
     if (!isToolAllowed(name, defaultRole, roles)) {
-      return {
-        content: [{ type: 'text', text: `Unknown tool: ${name}` }],
-        isError: true,
-      };
+      return normalizeMCPResult(errorResult(`Unknown tool: ${name}`), serverInfo) as never;
     }
 
-    // Dispatch to handler
-    const handler = dispatch.get(name);
-    if (!handler) {
-      return {
-        content: [{ type: 'text', text: `Unknown tool: ${name}` }],
-        isError: true,
-      };
+    const toolHandler = dispatch.get(name);
+    if (!toolHandler) {
+      return normalizeMCPResult(errorResult(`Unknown tool: ${name}`), serverInfo) as never;
     }
+
+    const handlerContext: MCPackHandlerContext = {
+      toolName: name,
+      role: defaultRole,
+      ...protocol,
+    };
 
     try {
-      const sessionId = (extra as any).sessionId as string | undefined;
-      const sid = sessionId ?? '__stdio__';
-      const ctx: MCPackHandlerContext = {
-        toolName: name,
-        sessionId: sid,
-        role: defaultRole,
-      };
-      const result = await handler(args, ctx);
-      engine.markToolLoaded(name, sessionId);
-      return normalizeResult(result);
-    } catch (err: any) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Tool "${name}" failed: ${err.message ?? 'Unknown error'}`,
-          },
-        ],
-        isError: true,
-      };
+      const result = await toolHandler(args, handlerContext);
+      return normalizeMCPResult(result, serverInfo) as never;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return normalizeMCPResult(
+        errorResult(`Tool "${name}" failed: ${message}`),
+        serverInfo,
+      ) as never;
     }
-  });
+  };
 
-  // 9. Return MCPackServer
   return {
-    server,
+    server: buildServer(),
+    handler: createMcpHandler(buildServer, { legacy: 'reject' }),
     handle: {
       destroy: () => engine.destroy(),
       stats: () => engine.stats(),
     },
   };
+}
+
+function errorResult(message: string): {
+  content: Array<{ type: 'text'; text: string }>;
+  isError: true;
+} {
+  return { content: [{ type: 'text', text: message }], isError: true };
+}
+
+function validateConfig(config: MCPackServerConfig): void {
+  if (!config.name) throw new Error('MCPack: config.name is required');
+  if (!config.version) throw new Error('MCPack: config.version is required');
+  if (!config.tools || config.tools.length === 0) {
+    throw new Error(
+      'MCPack: config.tools is empty. Provide at least one tool definition.',
+    );
+  }
 }

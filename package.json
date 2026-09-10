@@ -1,7 +1,7 @@
 {
   "name": "@llvs/mcpack",
   "version": "1.0.0",
-  "description": "Lazy, queryable, session-aware tool discovery for MCP servers",
+  "description": "Policy gateway and lazy, role-aware tool discovery for MCP servers",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -15,26 +15,41 @@
     "dist"
   ],
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   },
   "scripts": {
     "build": "tsc",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "lint": "eslint src/app.ts src/server.ts src/policy src/gateway src/http src/tools src/approval src/audit src/demo tests eslint.config.js vitest.config.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --reporter=verbose",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "harness": "npx tsx test/harness/stripe-harness.ts"
+    "harness": "npx tsx test/harness/stripe-harness.ts",
+    "demo": "tsx src/demo/audit-demo.ts",
+    "demo:mcp": "tsx src/demo/mcp-adapter-demo.ts",
+    "demo:mcp:e2e": "tsx src/demo/mcp-e2e-demo.ts"
   },
-  "peerDependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0"
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
+    "fastify": "^5.12.3",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@cfworker/json-schema": "^4.1.1",
+    "@eslint/js": "^9.0.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@types/node": "^25.5.0",
     "@vitest/coverage-v8": "^4.1.0",
+    "eslint": "^9.0.0",
+    "eslint-config-prettier": "^10.0.0",
+    "prettier": "^3.0.0",
+    "tsx": "^4.0.0",
     "typescript": "~5.8.3",
-    "vitest": "^4.1.0",
-    "zod": "^3.25.76"
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^4.1.0"
   }
 }

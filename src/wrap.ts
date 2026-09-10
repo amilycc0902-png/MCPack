@@ -1,142 +1,262 @@
-import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
-  ListToolsRequestSchema,
-  CallToolRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import type { MCPackConfig, MCPackHandle } from './types.js';
+  CLIENT_CAPABILITIES_META_KEY,
+  CLIENT_INFO_META_KEY,
+  PROTOCOL_VERSION_META_KEY,
+  SERVER_INFO_META_KEY,
+  Server,
+  createMcpHandler,
+  type CallToolRequest,
+  type ClientCapabilities,
+  type Implementation,
+  type JSONRPCRequest,
+  type McpHttpHandler,
+  type ServerCapabilities,
+  type ServerContext,
+  type Tool,
+} from '@modelcontextprotocol/server';
+import type {
+  MCPackConfig,
+  MCPackWrappedServer,
+  MCPackWrapTarget,
+} from './types.js';
 import { MCPackEngine } from './core.js';
 import { isToolAllowed } from './roles.js';
+import { protocolContextFromServerContext } from './mcp/protocol.js';
+import { normalizeMCPResult } from './mcp/result.js';
 
-// NOTE: Uses low-level Server class. The SDK marks Server as @deprecated
-// in favor of McpServer, but MCPack requires setRequestHandler() for
-// handler interception, which McpServer does not expose.
-
-// ─── Types ──────────────────────────────────────────────────────────────────────
-
-type RawHandler = (request: any, extra: any) => Promise<any>;
-
-// ─── Entry Point ────────────────────────────────────────────────────────────────
+const WRAPPER_CLIENT_INFO: Implementation = {
+  name: '@llvs/mcpack',
+  version: '1.0.0',
+};
 
 /**
- * Wrap an existing MCP Server with MCPack's lazy tool discovery.
+ * Compose MCPack in front of a stateless MCP v2 HTTP handler.
  *
- * Captures the server's existing tools/list and tools/call handlers,
- * replaces them with MCPack interceptors, and returns a control handle.
- *
- * Must be called BEFORE `server.connect(transport)`.
- *
- * @param server - An MCP SDK Server instance with tools capability
- * @param config - Optional MCPack configuration (roles, index, session settings)
- * @returns MCPackHandle for lifecycle management (destroy, stats)
+ * The v2 SDK deliberately exposes no public handler lookup/replacement API, so
+ * M2 wraps at its public request/response boundary instead of mutating Server
+ * internals. The returned handler is a new, stateless 2026-07-28 endpoint.
  */
 export async function mcpack(
-  server: Server,
+  target: MCPackWrapTarget | McpHttpHandler,
   config: MCPackConfig = {},
-): Promise<MCPackHandle> {
-  // 1. Capture original handlers before overwriting
-  const handlers = (server as any)._requestHandlers as
-    | Map<string, RawHandler>
-    | undefined;
-  if (!handlers) {
+): Promise<MCPackWrappedServer> {
+  const upstream = isWrapTarget(target) ? target.handler : target;
+  if (!upstream || typeof upstream.fetch !== 'function') {
     throw new Error(
-      'MCPack: server._requestHandlers not found. Ensure you are passing an MCP SDK Server instance.',
+      'MCPack: wrap mode requires a v2 McpHttpHandler or { handler } target.',
     );
   }
 
-  const originalCallHandler = handlers.get('tools/call');
-  const originalListHandler = handlers.get('tools/list');
+  const bootstrapMeta = requestMeta({}, WRAPPER_CLIENT_INFO);
+  const discover = await invokeUpstream(
+    upstream,
+    'server/discover',
+    {},
+    bootstrapMeta,
+  );
+  const serverInfo = readServerInfo(discover);
+  const upstreamCapabilities = readCapabilities(discover);
 
-  // 2. Call-and-capture tool definitions via original tools/list handler
   let tools: Tool[] = [];
-  if (originalListHandler) {
-    try {
-      const fakeExtra = {
-        signal: new AbortController().signal,
-        requestId: 0,
-        sendNotification: async () => {},
-        sendRequest: async () => {
-          throw new Error('not available');
-        },
-      };
-      const result = await originalListHandler(
-        { method: 'tools/list', params: {} },
-        fakeExtra,
-      );
-      tools = result?.tools ?? [];
-    } catch {
-      // Fall back to config tools if provided (handled below)
-    }
+  try {
+    const listed = await invokeUpstream(upstream, 'tools/list', {}, bootstrapMeta);
+    tools = Array.isArray(listed.tools) ? listed.tools as Tool[] : [];
+  } catch {
+    tools = (config.tools ?? []) as unknown as Tool[];
   }
-
-  // 3. Fallback to config.tools if original handler returned nothing
-  if (tools.length === 0 && (config as any).tools) {
-    tools = (config as any).tools;
-  }
-  // Throw if still empty -- MCPack requires tools
   if (tools.length === 0) {
-    throw new Error('MCPack: no tools found on server. Ensure tools are registered before calling mcpack()');
+    throw new Error(
+      'MCPack: no tools found on upstream server. Ensure tools are registered before calling mcpack().',
+    );
   }
 
-  // 4. Create engine
-  const engine = new MCPackEngine(tools, config);
-
-  // Snapshot mutable config at setup
+  const engine = new MCPackEngine(tools, config, { stateless: true });
   const roles = config.roles ? { ...config.roles } : undefined;
   const defaultRole = config.defaultRole;
+  const capabilities = mergeCapabilities(upstreamCapabilities);
 
   if (defaultRole && roles && !roles[defaultRole]) {
-    console.warn(`MCPack: defaultRole "${defaultRole}" is not defined in roles config. Sessions will see no tools.`);
+    console.warn(
+      `MCPack: defaultRole "${defaultRole}" is not defined in roles config. Requests will see no tools.`,
+    );
   }
 
-  // 5. Replace tools/list handler
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return engine.handleToolsList();
-  });
+  const createServer = (): Server => {
+    const server = new Server(serverInfo, { capabilities });
 
-  // 6. Replace tools/call handler
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    server.setRequestHandler('tools/list', async (_request, context) => {
+      protocolContextFromServerContext(context);
+      return normalizeMCPResult(engine.handleToolsList(), serverInfo) as never;
+    });
+
+    server.setRequestHandler('tools/call', async (request, context) =>
+      handleToolCall(request, context),
+    );
+    server.fallbackRequestHandler = async (request, context) =>
+      forwardRequest(request, context);
+    return server;
+  };
+
+  const forwardRequest = async (
+    request: JSONRPCRequest,
+    context: ServerContext,
+  ): Promise<never> => {
+    const protocol = protocolContextFromServerContext(context);
+    const params = isRecord(request.params) ? request.params : {};
+    const name = typeof params.name === 'string' ? params.name : undefined;
+    const result = await invokeUpstream(
+      upstream,
+      request.method,
+      params,
+      requestMeta(protocol.clientCapabilities, protocol.clientInfo),
+      name,
+    );
+    return normalizeMCPResult(result, serverInfo) as never;
+  };
+
+  const handleToolCall = async (
+    request: CallToolRequest,
+    context: ServerContext,
+  ): Promise<never> => {
+    const protocol = protocolContextFromServerContext(context);
     const name = request.params.name;
-    const args = (request.params.arguments == null ? {} : request.params.arguments) as Record<string, unknown>;
+    const args = (request.params.arguments ?? {}) as Record<string, unknown>;
 
-    // Route search_tools to engine
     if (name === 'search_tools') {
-      const sessionId = (extra as any).sessionId as string | undefined;
-      return engine.handleSearchTools(args, sessionId);
+      return normalizeMCPResult(
+        engine.handleSearchToolsStateless(args),
+        serverInfo,
+      ) as never;
     }
 
-    // Defense-in-depth: role check before proxying
+    config.onToolCall?.({
+      toolName: name,
+      arguments: args,
+      ...protocol,
+      userQuery: args.user_query,
+      requestContext: args.request_context,
+    });
+
     if (!isToolAllowed(name, defaultRole, roles)) {
-      return {
-        content: [{ type: 'text', text: `Unknown tool: ${name}` }],
-        isError: true,
-      };
-    }
-
-    // Proxy to original handler
-    if (!originalCallHandler) {
-      return {
-        content: [{ type: 'text', text: `Unknown tool: ${name}` }],
-        isError: true,
-      };
+      return normalizeMCPResult(
+        opaqueToolError(name),
+        serverInfo,
+      ) as never;
     }
 
     try {
-      const result = await originalCallHandler(request, extra);
-      const sessionId = (extra as any).sessionId as string | undefined;
-      engine.markToolLoaded(name, sessionId);
-      return result;
-    } catch (err: any) {
-      return {
-        content: [{ type: 'text', text: `Tool "${name}" failed: ${err.message ?? 'Unknown error'}` }],
-        isError: true,
-      };
+      const upstreamResult = await invokeUpstream(
+        upstream,
+        'tools/call',
+        { name, arguments: args },
+        requestMeta(protocol.clientCapabilities, protocol.clientInfo),
+        name,
+      );
+      return normalizeMCPResult(upstreamResult, serverInfo) as never;
+    } catch {
+      return normalizeMCPResult(
+        {
+          content: [{ type: 'text', text: `Tool "${name}" failed` }],
+          isError: true,
+        },
+        serverInfo,
+      ) as never;
     }
-  });
-
-  // 7. Return MCPackHandle
-  return {
-    destroy: () => engine.destroy(),
-    stats: () => engine.stats(),
   };
+
+  return {
+    handler: createMcpHandler(createServer, { legacy: 'reject' }),
+    handle: {
+      destroy: () => engine.destroy(),
+      stats: () => engine.stats(),
+    },
+  };
+}
+
+function requestMeta(
+  clientCapabilities: ClientCapabilities,
+  clientInfo?: Implementation,
+): Record<string, unknown> {
+  return {
+    [PROTOCOL_VERSION_META_KEY]: '2026-07-28',
+    [CLIENT_CAPABILITIES_META_KEY]: clientCapabilities,
+    ...(clientInfo === undefined ? {} : { [CLIENT_INFO_META_KEY]: clientInfo }),
+  };
+}
+
+async function invokeUpstream(
+  handler: McpHttpHandler,
+  method: string,
+  params: Record<string, unknown>,
+  meta: Record<string, unknown>,
+  toolName?: string,
+): Promise<Record<string, unknown>> {
+  const headers: Record<string, string> = {
+    accept: 'application/json, text/event-stream',
+    'content-type': 'application/json',
+    'MCP-Protocol-Version': '2026-07-28',
+    'Mcp-Method': method,
+    ...(toolName === undefined ? {} : { 'Mcp-Name': toolName }),
+  };
+  const response = await handler.fetch(new Request('http://mcpack.local/mcp', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method,
+      params: { ...params, _meta: meta },
+    }),
+  }));
+  const payload = await response.json() as {
+    result?: Record<string, unknown>;
+    error?: { message?: string };
+  };
+  if (!response.ok || payload.error || !payload.result) {
+    throw new Error(payload.error?.message ?? `Upstream ${method} failed`);
+  }
+  return payload.result;
+}
+
+function readServerInfo(discover: Record<string, unknown>): Implementation {
+  const meta = isRecord(discover._meta) ? discover._meta : {};
+  const info = meta[SERVER_INFO_META_KEY];
+  if (!isImplementation(info)) {
+    throw new Error('MCPack: upstream server/discover did not identify the server.');
+  }
+  return info;
+}
+
+function readCapabilities(discover: Record<string, unknown>): ServerCapabilities {
+  return isRecord(discover.capabilities)
+    ? discover.capabilities as ServerCapabilities
+    : {};
+}
+
+function mergeCapabilities(upstream: ServerCapabilities): ServerCapabilities {
+  // MCPack owns tools/list and cannot truthfully forward upstream list-change
+  // subscriptions, so it preserves other upstream capabilities but advertises
+  // only the compatible tools surface.
+  return { ...upstream, tools: {} };
+}
+
+function opaqueToolError(name: string) {
+  return {
+    content: [{ type: 'text', text: `Unknown tool: ${name}` }],
+    isError: true,
+  };
+}
+
+function isWrapTarget(value: MCPackWrapTarget | McpHttpHandler): value is MCPackWrapTarget {
+  return isRecord(value) && 'handler' in value;
+}
+
+function isImplementation(value: unknown): value is Implementation {
+  return isRecord(value) &&
+    typeof value.name === 'string' &&
+    typeof value.version === 'string';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
