@@ -6,6 +6,8 @@ import type {
 
 export interface ToolCallRequest {
   requestId: string;
+  /** Original MCP JSON-RPC request ID when the call entered through MCP. */
+  mcpRequestId?: string | number;
   userId: string;
   userRole: string;
   agentId: string;

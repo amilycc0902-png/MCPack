@@ -29,14 +29,14 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "harness": "npx tsx test/harness/stripe-harness.ts",
-    "demo": "tsx src/demo/audit-demo.ts"
+    "demo": "tsx src/demo/audit-demo.ts",
+    "demo:mcp": "tsx src/demo/mcp-adapter-demo.ts",
+    "demo:mcp:e2e": "tsx src/demo/mcp-e2e-demo.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
     "fastify": "^5.0.0",
     "zod": "^3.25.76"
-  },
-  "peerDependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0"
   },
   "devDependencies": {
     "@cfworker/json-schema": "^4.1.1",

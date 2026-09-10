@@ -1,5 +1,10 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import type {
+  ClientCapabilities,
+  Implementation,
+  McpHttpHandler,
+  Server as ModernServer,
+  Tool,
+} from '@modelcontextprotocol/server';
 
 // ─── Public Types ───────────────────────────────────────────────────────────
 
@@ -12,6 +17,8 @@ export interface MCPackConfig {
   index?: IndexConfig;
   session?: SessionConfig;
   onToolCall?: (observation: MCPackToolCallObservation) => void;
+  /** Optional bootstrap fallback when an upstream tools/list call fails. */
+  tools?: Tool[];
 }
 
 /**
@@ -29,8 +36,11 @@ export interface MCPackServerConfig extends MCPackConfig {
  */
 export interface MCPackHandlerContext {
   toolName: string;
-  sessionId: string;
   role: string | undefined;
+  protocolVersion: string;
+  clientCapabilities: ClientCapabilities;
+  /** Self-reported attribution only; it never grants a role or permission. */
+  clientInfo?: Implementation;
 }
 
 /**
@@ -39,7 +49,10 @@ export interface MCPackHandlerContext {
 export interface MCPackToolCallObservation {
   toolName: string;
   arguments: Record<string, unknown>;
-  sessionId: string | undefined;
+  protocolVersion: string;
+  clientCapabilities: ClientCapabilities;
+  /** Self-reported attribution only; it never grants a role or permission. */
+  clientInfo?: Implementation;
   userQuery?: unknown;
   requestContext?: unknown;
 }
@@ -79,7 +92,8 @@ export interface SearchToolResponse {
   tools: SearchResult[];
   total_available: number;
   showing: number;
-  session_id: string;
+  /** @deprecated Present only in legacy wrap mode. Build mode is stateless. */
+  session_id?: string;
 }
 
 /**
@@ -97,6 +111,13 @@ export interface SearchResult {
 export interface ToolCallResult {
   content: Array<{ type: string; text: string }>;
   isError?: boolean;
+  resultType?: 'complete' | 'input_required';
+  _meta?: Record<string, unknown>;
+}
+
+export interface MCPackResult extends ToolCallResult {
+  resultType: 'complete' | 'input_required';
+  _meta: Record<string, unknown>;
 }
 
 /**
@@ -111,7 +132,21 @@ export interface MCPackHandle {
  * Return value from createMCPackServer() containing the server and control handle.
  */
 export interface MCPackServer {
-  server: Server;
+  /** A build-mode server instance for direct/legacy transport integration. */
+  server: ModernServer;
+  /** Stateless 2026-07-28 HTTP handler. No initialize or session is required. */
+  handler: McpHttpHandler;
+  handle: MCPackHandle;
+}
+
+/** Public v2 composition target accepted by stateless wrap mode. */
+export interface MCPackWrapTarget {
+  handler: McpHttpHandler;
+}
+
+/** Stateless endpoint and lifecycle handle returned by wrap mode. */
+export interface MCPackWrappedServer {
+  handler: McpHttpHandler;
   handle: MCPackHandle;
 }
 

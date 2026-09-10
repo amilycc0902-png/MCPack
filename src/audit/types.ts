@@ -16,6 +16,8 @@ export interface AuditEvent {
   eventId: string;
   eventType: AuditEventType;
   requestId: string;
+  /** Original MCP request ID; this is correlation data, not authority. */
+  mcpRequestId?: string | number;
   userId?: string;
   userRole?: string;
   agentId?: string;

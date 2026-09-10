@@ -91,6 +91,33 @@ npm run demo
 
 The demo prints allow, deny, approval, and approved execution responses followed by the sanitized audit events.
 
+### MCP 2026 Policy Gateway adapter
+
+Phase M3 adds a transport boundary that maps an MCP `tools/call` request into
+the existing `ToolCallService`. The adapter requires explicit untrusted POC
+identity (`userId`, `userRole`, and `agentId`) separately from MCP `clientInfo`,
+mints an independent gateway correlation ID, and maps allow, opaque deny, and
+require-approval outcomes into normalized MCP results. Approval-required
+responses contain an explicit `approvalId` and `executed: false`; M4 adds the
+explicit status and exactly-once execution continuation described below.
+
+Run the MCP-shaped M3 demonstration with:
+
+```bash
+npm run demo:mcp
+```
+
+Run the complete M1–M5 local lifecycle demonstration with:
+
+```bash
+npm run demo:mcp:e2e
+```
+
+The presentation sequence and expected evidence are documented in
+[`docs/mcp-e2e-demo-guide.md`](docs/mcp-e2e-demo-guide.md). The POC completion
+boundary is summarized in
+[`docs/poc-completion-summary.md`](docs/poc-completion-summary.md).
+
 Intentionally excluded from this POC are audit databases, dashboards, durable or production storage, complex audit-search APIs, immutable ledgers, production authentication, real MCP integration, external databases, and real external side effects. In-memory audit events and approvals disappear when the process exits.
 
 Optional local settings are documented in `.env.example`. This POC does not load `.env` files automatically; provide values through the process environment if needed.
@@ -105,17 +132,18 @@ Built for a venture studio that needed to give co-founders and partners agent-le
 npm install @llvs/mcpack
 ```
 
-Peer dependency: `@modelcontextprotocol/sdk ^1.0.0`
+MCPack pins `@modelcontextprotocol/server 2.0.0`, the official v2 SDK line that
+supports MCP protocol `2026-07-28`.
 
 ## Quick Start
 
 ```typescript
 import { mcpack } from '@llvs/mcpack';
 
-// your existing MCP server
-const server = createMyServer();
+// A public, stateless v2 McpHttpHandler from createMcpHandler(...)
+const upstream = createMyMcpHandler();
 
-const handle = await mcpack(server, {
+const { handler, handle } = await mcpack(upstream, {
   roles: {
     cofounder: ['get_deals', 'update_deal_status', 'list_payments'],
     advisor:   ['get_deals'],
@@ -124,7 +152,7 @@ const handle = await mcpack(server, {
   defaultRole: 'advisor'
 });
 
-server.connect(transport);
+// Mount handler.fetch in a Web Request/Response-compatible HTTP host.
 ```
 
 That's it. Your server now enforces role-based access at both layers:
@@ -155,12 +183,18 @@ A `cofounder` searching "deals and payments" sees `get_deals`, `update_deal_stat
 
 ### Wrap Mode
 
-Wrap any existing MCP server with one function call. MCPack intercepts `tools/list` and `tools/call`, adds RBAC and lazy discovery on top.
+Compose MCPack in front of an existing stateless MCP v2 HTTP handler. MCPack
+discovers the upstream server through public MCP requests, then exposes a new
+handler that adds RBAC and lazy discovery.
 
 ```typescript
 import { mcpack } from '@llvs/mcpack';
 
-const handle = await mcpack(server, {
+const upstream = createMcpHandler(() => createMyServer(), {
+  legacy: 'reject'
+});
+
+const { handler, handle } = await mcpack(upstream, {
   roles: {
     cofounder: ['get_deals', 'update_deal_status', 'list_payments'],
     advisor:   ['get_deals'],
@@ -177,7 +211,7 @@ Build a new MCP server from scratch with RBAC baked in from the start.
 ```typescript
 import { createMCPackServer } from '@llvs/mcpack';
 
-const { server, handle } = createMCPackServer({
+const { handler, handle } = createMCPackServer({
   name: 'venture-server',
   version: '1.0.0',
   roles: {
@@ -199,14 +233,60 @@ const { server, handle } = createMCPackServer({
   ],
 });
 
-server.connect(transport);
+// Mount handler.fetch in a Web Request/Response-compatible HTTP host.
+// server/discover may be the first request; initialize is not used.
 ```
 
-Both modes use the same engine. Same RBAC enforcement. Same `search_tools` interface. Same session-aware behavior.
+Both modes retain the same RBAC filtering and `search_tools` interface. Build
+mode is stateless under MCP `2026-07-28`: every request carries protocol
+metadata, and every search returns complete matching schemas. Wrap mode uses
+the same request-scoped protocol boundary.
 
-## Session Tracking
+#### Build-mode compatibility change
 
-Schemas loaded once per session are returned as lightweight references on subsequent calls. No duplicate payloads, ever.
+Build mode no longer reads `extra.sessionId`, accepts `Mcp-Session-Id`, creates
+a synthetic stdio session, or requires `initialize` / `notifications/initialized`.
+`MCPackHandlerContext.sessionId` was replaced with request-scoped
+`protocolVersion`, `clientCapabilities`, and optional self-reported `clientInfo`.
+The latter is attribution only and never changes role or policy decisions.
+Build-mode search responses no longer contain `session_id`.
+
+Wrap mode also no longer mutates an SDK `Server` in place. The v2 SDK has no
+public API for retrieving registered handlers, so `mcpack()` now composes over
+a public `McpHttpHandler` and returns `{ handler, handle }`. This avoids the
+former private `_requestHandlers` dependency. Wrap mode preserves the upstream
+identity, merges its capabilities with MCPack's tools capability, forwards tool
+calls through ordinary stateless MCP requests, and never uses clientInfo for
+authorization.
+
+### Explicit MCP approval continuation (M4)
+
+Policy-gated MCP calls that require review return an explicit `approvalId`.
+Clients may inspect it with `approvals.status` and, after the existing local
+approval fixture approves it, execute it with `approvals.execute`. Both calls
+take exactly `{ "approvalId": "approval-..." }`; they require no initialize,
+session header, prior connection history, or reused JSON-RPC request ID.
+
+The stored original requester, role, agent, tool, arguments, policy match, and
+gateway correlation remain immutable. Request `clientInfo` is attribution only
+and cannot replace that identity. Execution uses the repository's atomic claim,
+so concurrent calls and retries cannot execute an approval twice. Normal MCP
+results include `resultType`, server identity, and request/origin correlation.
+
+The public `ToolCallRequest`, `RequestContext`, `Approval`, and `AuditEvent`
+types now have an optional `mcpRequestId` correlation field. This is a
+session-related compatibility change: integrations that serialize these values
+may observe the new field, but it is optional and is never authorization data.
+
+Approval expiry is intentionally not invented in M4 because the current local
+approval model has no expiry state. Durable storage, expiry semantics, and the
+full end-to-end MCP gateway conformance demonstration remain M5 work.
+
+## Legacy Wrap-mode Session Tracking
+
+This session-gated behavior is retained only in the legacy engine tests and is
+not used by either MCP `2026-07-28` adapter. Build and wrap mode return complete
+schemas deterministically on every request.
 
 ```json
 {
@@ -217,7 +297,9 @@ Schemas loaded once per session are returned as lightweight references on subseq
 }
 ```
 
-`loaded: false` — full schema included (first time this session). `loaded: true` — agent already has it, MCPack sends a reference only.
+The JSON above documents the retired legacy representation. Modern build and
+wrap responses always use `loaded: false` with the complete schema and omit
+`session_id`.
 
 ## Token Reduction: A Side Effect Worth Measuring
 

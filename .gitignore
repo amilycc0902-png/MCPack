@@ -15,3 +15,7 @@ test/harness/report.json
 
 # Graphify output
 graphify-out/
+
+# Local nested repository and patch backup
+auth/
+*.patch

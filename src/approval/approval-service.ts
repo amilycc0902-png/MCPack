@@ -73,6 +73,9 @@ export class ApprovalService {
     const approval: Approval = {
       approvalId: this.options.generateApprovalId(),
       requestId: requestContext.requestId,
+      ...(requestContext.mcpRequestId === undefined
+        ? {}
+        : { mcpRequestId: requestContext.mcpRequestId }),
       status: 'pending',
       requesterUserId: requestContext.userId,
       requesterRole: requestContext.userRole,
@@ -87,6 +90,7 @@ export class ApprovalService {
     await this.options.audit.emit({
       eventType: 'approval_created',
       requestId: approval.requestId,
+      mcpRequestId: approval.mcpRequestId,
       userId: approval.requesterUserId,
       userRole: approval.requesterRole,
       agentId: approval.agentId,
@@ -204,6 +208,7 @@ export class ApprovalService {
         eventType:
           status === 'approved' ? 'approval_approved' : 'approval_rejected',
         requestId: existing.requestId,
+        mcpRequestId: existing.mcpRequestId,
         userId: existing.requesterUserId,
         userRole: existing.requesterRole,
         agentId: existing.agentId,
@@ -243,6 +248,7 @@ export class ApprovalService {
       await this.options.audit.emit({
         eventType: 'tool_execution_started',
         requestId: claim.approval.requestId,
+        mcpRequestId: claim.approval.mcpRequestId,
         userId: claim.approval.requesterUserId,
         userRole: claim.approval.requesterRole,
         agentId: claim.approval.agentId,
@@ -270,6 +276,7 @@ export class ApprovalService {
         await this.options.audit.emit({
           eventType: 'tool_execution_succeeded',
           requestId: executedApproval.requestId,
+          mcpRequestId: executedApproval.mcpRequestId,
           userId: executedApproval.requesterUserId,
           userRole: executedApproval.requesterRole,
           agentId: executedApproval.agentId,
@@ -316,6 +323,7 @@ export class ApprovalService {
         await this.options.audit.emit({
           eventType: 'tool_execution_failed',
           requestId: claim.approval.requestId,
+          mcpRequestId: claim.approval.mcpRequestId,
           userId: claim.approval.requesterUserId,
           userRole: claim.approval.requesterRole,
           agentId: claim.approval.agentId,

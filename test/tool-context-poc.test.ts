@@ -1,151 +1,77 @@
-import { describe, it, expect, afterEach } from 'vitest';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { describe, expect, it } from 'vitest';
 import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+  CLIENT_CAPABILITIES_META_KEY,
+  CLIENT_INFO_META_KEY,
+  PROTOCOL_VERSION_META_KEY,
+  Server,
+  createMcpHandler,
+} from '@modelcontextprotocol/server';
 import { mcpack } from '../src/wrap.js';
-import type { MCPackHandle, MCPackToolCallObservation } from '../src/types.js';
+import type { MCPackToolCallObservation } from '../src/types.js';
 
-type RawHandler = (request: any, extra: any) => Promise<any>;
-
-function makeExtra(sessionId = 'session-poc') {
-  return {
-    signal: new AbortController().signal,
-    requestId: 1,
-    sessionId,
-    sendNotification: async () => {},
-    sendRequest: async () => {
-      throw new Error('not available');
-    },
-  };
-}
-
-function getHandler(server: Server, method: string): RawHandler {
-  const handler = (server as any)._requestHandlers?.get(method);
-  if (!handler) throw new Error(`No handler for ${method}`);
-  return handler;
-}
-
-function createServer(tools: Tool[]): Server {
-  const server = new Server(
-    { name: 'context-poc-server', version: '1.0.0' },
-    { capabilities: { tools: {} } },
-  );
-
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
-  server.setRequestHandler(CallToolRequestSchema, async (request) => ({
-    content: [{ type: 'text', text: `called:${request.params.name}` }],
-  }));
-
-  return server;
-}
-
-describe('tool-call context POC', () => {
-  let handle: MCPackHandle | undefined;
-
-  afterEach(() => {
-    handle?.destroy();
-    handle = undefined;
-  });
-
-  it('normal MCP tool calls expose only tool name and arguments to MCPack', async () => {
+describe('stateless wrapped tool-call context', () => {
+  it('reports request-scoped protocol attribution without session identity', async () => {
     const observations: MCPackToolCallObservation[] = [];
-    const server = createServer([
-      {
-        name: 'send_email',
-        description: 'Send an email',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            to: { type: 'string' },
-            subject: { type: 'string' },
-          },
-          required: ['to', 'subject'],
-        },
-      },
-    ]);
-
-    handle = await mcpack(server, {
-      onToolCall: observation => observations.push(observation),
-    });
-
-    const callHandler = getHandler(server, 'tools/call');
-    await callHandler(
-      {
-        method: 'tools/call',
-        params: {
+    const upstream = createMcpHandler(() => {
+      const server = new Server(
+        { name: 'context-server', version: '1.0.0' },
+        { capabilities: { tools: {} } },
+      );
+      server.setRequestHandler('tools/list', async () => ({
+        tools: [{
           name: 'send_email',
-          arguments: { to: 'ops@example.com', subject: 'Status' },
-        },
-      },
-      makeExtra(),
-    );
-
-    expect(observations).toEqual([
-      {
-        toolName: 'send_email',
-        arguments: { to: 'ops@example.com', subject: 'Status' },
-        sessionId: 'session-poc',
-        userQuery: undefined,
-        requestContext: undefined,
-      },
-    ]);
-  });
-
-  it('schema-provided user_query or request_context can be logged when the client sends it', async () => {
-    const observations: MCPackToolCallObservation[] = [];
-    const server = createServer([
-      {
-        name: 'send_email',
-        description: 'Send an email',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            to: { type: 'string' },
-            subject: { type: 'string' },
-            user_query: { type: 'string' },
-            request_context: { type: 'object' },
-          },
-          required: ['to', 'subject'],
-        },
-      },
-    ]);
-
-    handle = await mcpack(server, {
-      onToolCall: observation => observations.push(observation),
+          description: 'Send an email',
+          inputSchema: { type: 'object', properties: {} },
+        }],
+      }));
+      server.setRequestHandler('tools/call', async () => ({
+        content: [{ type: 'text', text: 'sent' }],
+      }));
+      return server;
+    }, { legacy: 'reject' });
+    const wrapped = await mcpack(upstream, {
+      onToolCall: (observation) => observations.push(observation),
     });
-
-    const callHandler = getHandler(server, 'tools/call');
-    await callHandler(
-      {
-        method: 'tools/call',
+    const meta = {
+      [PROTOCOL_VERSION_META_KEY]: '2026-07-28',
+      [CLIENT_CAPABILITIES_META_KEY]: { tools: {} },
+      [CLIENT_INFO_META_KEY]: { name: 'context-client', version: '1.0.0' },
+    };
+    await wrapped.handler.fetch(new Request('http://test.local/mcp', {
+      method: 'POST',
+      headers: {
+        accept: 'application/json, text/event-stream',
+        'content-type': 'application/json',
+        'MCP-Protocol-Version': '2026-07-28',
+        'Mcp-Method': 'tools/call',
+        'Mcp-Name': 'send_email',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: 1, method: 'tools/call',
         params: {
           name: 'send_email',
           arguments: {
-            to: 'ops@example.com',
-            subject: 'Status',
-            user_query: 'Tell ops the rollout is complete',
-            request_context: { workflow: 'release', risk: 'low' },
+            user_query: 'Send the update',
+            request_context: { workflow: 'release' },
           },
+          _meta: meta,
         },
-      },
-      makeExtra(),
-    );
+      }),
+    }));
 
-    expect(observations).toHaveLength(1);
-    expect(observations[0]).toMatchObject({
+    expect(observations).toEqual([{
       toolName: 'send_email',
-      sessionId: 'session-poc',
-      userQuery: 'Tell ops the rollout is complete',
-      requestContext: { workflow: 'release', risk: 'low' },
-    });
-    expect(observations[0].arguments).toEqual({
-      to: 'ops@example.com',
-      subject: 'Status',
-      user_query: 'Tell ops the rollout is complete',
-      request_context: { workflow: 'release', risk: 'low' },
-    });
+      arguments: {
+        user_query: 'Send the update',
+        request_context: { workflow: 'release' },
+      },
+      protocolVersion: '2026-07-28',
+      clientCapabilities: { tools: {} },
+      clientInfo: { name: 'context-client', version: '1.0.0' },
+      userQuery: 'Send the update',
+      requestContext: { workflow: 'release' },
+    }]);
+    expect(observations[0]).not.toHaveProperty('sessionId');
+    wrapped.handle.destroy();
   });
 });

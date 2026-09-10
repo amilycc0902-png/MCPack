@@ -1,4 +1,4 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 import type {
   MCPackConfig,
   ToolIndexEntry,
@@ -29,13 +29,19 @@ function errorResult(message: string): ToolCallResult {
 export class MCPackEngine {
   private readonly config: MCPackConfig;
   private readonly index: ToolIndexEntry[];
-  private readonly sessions: SessionRegistry;
+  private readonly sessions: SessionRegistry | undefined;
   private readonly searchToolDefinition: Tool;
 
-  constructor(tools: Tool[], config: MCPackConfig) {
+  constructor(
+    tools: Tool[],
+    config: MCPackConfig,
+    options: { stateless?: boolean } = {},
+  ) {
     this.config = config;
     this.index = buildIndex(tools);
-    this.sessions = new SessionRegistry(config.session);
+    this.sessions = options.stateless
+      ? undefined
+      : new SessionRegistry(config.session);
     this.searchToolDefinition = {
       name: 'search_tools',
       description:
@@ -82,7 +88,7 @@ export class MCPackEngine {
     // Resolve session
     const sid = sessionId ?? STDIO_SESSION_ID;
     const role = this.config.defaultRole;
-    const session = this.sessions.getOrCreate(sid, role ?? '');
+    const session = this.requireSessionRegistry().getOrCreate(sid, role ?? '');
 
     // Role-filter the index
     const allowed = resolveRoleAccess(role, this.config.roles, this.index);
@@ -123,17 +129,50 @@ export class MCPackEngine {
   }
 
   /**
+   * Stateless build-mode search. Every call returns complete matching schemas
+   * and depends only on the arguments plus the configured catalog and role.
+   */
+  handleSearchToolsStateless(args: Record<string, unknown>): ToolCallResult {
+    if (!args.query || typeof args.query !== 'string') {
+      return errorResult('search_tools requires a "query" string parameter');
+    }
+
+    const allowed = resolveRoleAccess(
+      this.config.defaultRole,
+      this.config.roles,
+      this.index,
+    );
+    const maxResults = this.config.index?.maxResults ?? 10;
+    const limit = Math.min(
+      typeof args.limit === 'number' ? args.limit : 5,
+      maxResults,
+    );
+    const matches = scoreAndRank(args.query, allowed, limit);
+    const response: SearchToolResponse = {
+      tools: matches.map((entry) => ({
+        name: entry.name,
+        loaded: false,
+        schema: entry.schema,
+      })),
+      total_available: allowed.length,
+      showing: matches.length,
+    };
+
+    return { content: [{ type: 'text', text: JSON.stringify(response) }] };
+  }
+
+  /**
    * Stop the session registry timer and clear all sessions.
    */
   destroy(): void {
-    this.sessions.destroy();
+    this.sessions?.destroy();
   }
 
   /**
    * Return current engine statistics.
    */
   stats(): { sessions: number; tools: number } {
-    return { sessions: this.sessions.size, tools: this.index.length };
+    return { sessions: this.sessions?.size ?? 0, tools: this.index.length };
   }
 
   /**
@@ -143,7 +182,14 @@ export class MCPackEngine {
   markToolLoaded(toolName: string, sessionId: string | undefined): void {
     const sid = sessionId ?? STDIO_SESSION_ID;
     const role = this.config.defaultRole;
-    const session = this.sessions.getOrCreate(sid, role ?? '');
+    const session = this.requireSessionRegistry().getOrCreate(sid, role ?? '');
     session.loadedTools.add(toolName);
+  }
+
+  private requireSessionRegistry(): SessionRegistry {
+    if (!this.sessions) {
+      throw new Error('MCPack: session APIs are unavailable in stateless mode.');
+    }
+    return this.sessions;
   }
 }

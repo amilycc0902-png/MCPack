@@ -2,6 +2,8 @@ export type PolicyEffect = 'allow' | 'deny' | 'require_approval';
 
 export interface RequestContext {
   requestId: string;
+  /** Original MCP JSON-RPC request ID, used only for cross-boundary correlation. */
+  mcpRequestId?: string | number;
   userId: string;
   userRole: string;
   agentId: string;

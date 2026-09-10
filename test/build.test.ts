@@ -1,488 +1,230 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+/* eslint-disable @typescript-eslint/no-explicit-any -- JSON-RPC wire assertions */
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  CLIENT_CAPABILITIES_META_KEY,
+  CLIENT_INFO_META_KEY,
+  PROTOCOL_VERSION_META_KEY,
+  SERVER_INFO_META_KEY,
+} from '@modelcontextprotocol/server';
 import { createMCPackServer } from '../src/build.js';
 import type {
-  MCPackServerConfig,
-  MCPackServer,
   MCPackHandlerContext,
+  MCPackServer,
+  MCPackServerConfig,
   MCPackToolDefinition,
-  ToolCallResult,
 } from '../src/types.js';
 
-// ─── Test Helpers ──────────────────────────────────────────────────────────────
-
-function makeExtra(sessionId?: string) {
-  return {
-    signal: new AbortController().signal,
-    requestId: 1,
-    ...(sessionId !== undefined ? { sessionId } : {}),
-    sendNotification: async () => {},
-    sendRequest: async () => {
-      throw new Error('not available');
-    },
-  };
-}
-
-type RawHandler = (request: any, extra: any) => Promise<any>;
-
-function getHandler(server: any, method: string): RawHandler {
-  const handler = (server as any)._requestHandlers?.get(method);
-  if (!handler) throw new Error(`No handler for ${method}`);
-  return handler;
-}
-
-const MOCK_TOOLS: MCPackToolDefinition[] = [
+const TOOLS: MCPackToolDefinition[] = [
   {
     name: 'create_customer',
     description: 'Create a new customer record',
     inputSchema: {
       type: 'object',
-      properties: { name: { type: 'string' }, email: { type: 'string' } },
-      required: ['name', 'email'],
+      properties: { name: { type: 'string' } },
+      required: ['name'],
     },
-    handler: async (args) => {
-      return `created:${args.name}`;
-    },
+    handler: async (args) => `created:${args.name}`,
   },
   {
     name: 'list_payments',
-    description: 'List all payments for a customer',
+    description: 'List customer payments',
     inputSchema: {
       type: 'object',
       properties: { customerId: { type: 'string' } },
-      required: ['customerId'],
     },
-    handler: async (args) => {
-      return { payments: [{ id: 'p1', amount: 100 }], customerId: args.customerId };
-    },
+    handler: async () => 'payments',
   },
   {
     name: 'delete_account',
-    description: 'Delete a user account permanently',
-    inputSchema: {
-      type: 'object',
-      properties: { accountId: { type: 'string' } },
-      required: ['accountId'],
-    },
-    handler: async () => {
-      return { content: [{ type: 'text', text: 'deleted' }] } as ToolCallResult;
-    },
+    description: 'Delete an account',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => 'deleted',
   },
 ];
 
-function makeConfig(overrides: Partial<MCPackServerConfig> = {}): MCPackServerConfig {
-  return {
-    name: 'test-server',
-    version: '1.0.0',
-    tools: MOCK_TOOLS,
-    ...overrides,
-  };
+function config(overrides: Partial<MCPackServerConfig> = {}): MCPackServerConfig {
+  return { name: 'test-server', version: '1.0.0', tools: TOOLS, ...overrides };
 }
 
-// ─── Tests ─────────────────────────────────────────────────────────────────────
+const validMeta = {
+  [PROTOCOL_VERSION_META_KEY]: '2026-07-28',
+  [CLIENT_CAPABILITIES_META_KEY]: {},
+  [CLIENT_INFO_META_KEY]: { name: 'test-client', version: '1.0.0' },
+};
 
-describe('createMCPackServer() build mode', () => {
-  let result: MCPackServer | undefined;
+async function request(
+  server: MCPackServer,
+  method: string,
+  params: Record<string, unknown> = {},
+  meta: Record<string, unknown> | undefined = validMeta,
+) {
+  const body = {
+    jsonrpc: '2.0',
+    id: 1,
+    method,
+    params: { ...params, ...(meta === undefined ? {} : { _meta: meta }) },
+  };
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    accept: 'application/json, text/event-stream',
+    'MCP-Protocol-Version':
+      typeof meta?.[PROTOCOL_VERSION_META_KEY] === 'string'
+        ? String(meta[PROTOCOL_VERSION_META_KEY])
+        : '2026-07-28',
+    'Mcp-Method': method,
+  };
+  if (method === 'tools/call') {
+    headers['Mcp-Name'] = String(params.name);
+  }
+  const response = await server.handler.fetch(
+    new Request('http://test.local/mcp', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    }),
+  );
+  return { status: response.status, body: await response.json() as any };
+}
+
+describe('createMCPackServer() M1 build mode', () => {
+  let built: MCPackServer | undefined;
 
   afterEach(() => {
-    result?.handle.destroy();
-    result = undefined;
+    built?.handle.destroy();
+    built = undefined;
   });
 
-  it('returns MCPackServer with server and handle properties', () => {
-    result = createMCPackServer(makeConfig());
+  it('server/discover works as the first request without initialize', async () => {
+    built = createMCPackServer(config());
+    const response = await request(built, 'server/discover');
 
-    expect(result.server).toBeDefined();
-    expect(result.handle).toBeDefined();
-    expect(typeof result.handle.destroy).toBe('function');
-    expect(typeof result.handle.stats).toBe('function');
+    expect(response.status).toBe(200);
+    expect(response.body.result.supportedVersions).toEqual(['2026-07-28']);
+    expect(response.body.result.capabilities).toEqual({ tools: {} });
+    expect(response.body.result.resultType).toBe('complete');
+    expect(response.body.result._meta[SERVER_INFO_META_KEY]).toEqual({
+      name: 'test-server',
+      version: '1.0.0',
+    });
   });
 
-  it('tools/list returns exactly one tool named search_tools', async () => {
-    result = createMCPackServer(makeConfig());
-
-    const listHandler = getHandler(result.server, 'tools/list');
-    const listResult = await listHandler(
-      { method: 'tools/list', params: {} },
-      makeExtra(),
-    );
-
-    expect(listResult.tools).toHaveLength(1);
-    expect(listResult.tools[0].name).toBe('search_tools');
-    expect(listResult.tools[0].inputSchema.properties).toHaveProperty('query');
-  });
-
-  it('tools/call with search_tools returns search results', async () => {
-    result = createMCPackServer(makeConfig());
-
-    const callHandler = getHandler(result.server, 'tools/call');
-    const callResult = await callHandler(
-      {
-        method: 'tools/call',
-        params: { name: 'search_tools', arguments: { query: 'customer' } },
-      },
-      makeExtra('session-1'),
-    );
-
-    expect(callResult.isError).toBeUndefined();
-    expect(callResult.content).toHaveLength(1);
-    const response = JSON.parse(callResult.content[0].text);
-    expect(response.tools).toBeDefined();
-    expect(response.total_available).toBeGreaterThan(0);
-    expect(response.session_id).toBe('session-1');
-  });
-
-  it('tools/call routes to correct handler by tool name', async () => {
-    result = createMCPackServer(makeConfig());
-
-    const callHandler = getHandler(result.server, 'tools/call');
-    const callResult = await callHandler(
-      {
-        method: 'tools/call',
-        params: { name: 'create_customer', arguments: { name: 'Alice', email: 'a@b.com' } },
-      },
-      makeExtra('session-1'),
-    );
-
-    expect(callResult.isError).toBeUndefined();
-    expect(callResult.content[0].text).toBe('created:Alice');
-  });
-
-  it('handler receives MCPackHandlerContext with toolName, sessionId, role', async () => {
-    let capturedCtx: MCPackHandlerContext | undefined;
-    const tools: MCPackToolDefinition[] = [
-      {
-        name: 'ctx_tool',
-        description: 'Tool to capture context',
-        inputSchema: { type: 'object', properties: {} },
-        handler: async (_args, ctx) => {
-          capturedCtx = ctx;
-          return 'ok';
-        },
-      },
-    ];
-
-    result = createMCPackServer(makeConfig({ tools, defaultRole: 'admin' }));
-
-    const callHandler = getHandler(result.server, 'tools/call');
-    await callHandler(
-      {
-        method: 'tools/call',
-        params: { name: 'ctx_tool', arguments: {} },
-      },
-      makeExtra('session-ctx'),
-    );
-
-    expect(capturedCtx).toBeDefined();
-    expect(capturedCtx!.toolName).toBe('ctx_tool');
-    expect(capturedCtx!.sessionId).toBe('session-ctx');
-    expect(capturedCtx!.role).toBe('admin');
-  });
-
-  it('string return from handler becomes text content', async () => {
-    result = createMCPackServer(makeConfig());
-
-    const callHandler = getHandler(result.server, 'tools/call');
-    const callResult = await callHandler(
-      {
-        method: 'tools/call',
-        params: { name: 'create_customer', arguments: { name: 'Bob' } },
-      },
-      makeExtra('session-1'),
-    );
-
-    expect(callResult.content[0].type).toBe('text');
-    expect(callResult.content[0].text).toBe('created:Bob');
-  });
-
-  it('object return from handler becomes JSON.stringify text content', async () => {
-    result = createMCPackServer(makeConfig());
-
-    const callHandler = getHandler(result.server, 'tools/call');
-    const callResult = await callHandler(
-      {
-        method: 'tools/call',
-        params: { name: 'list_payments', arguments: { customerId: 'c1' } },
-      },
-      makeExtra('session-1'),
-    );
-
-    expect(callResult.content[0].type).toBe('text');
-    const parsed = JSON.parse(callResult.content[0].text);
-    expect(parsed.payments).toBeDefined();
-    expect(parsed.customerId).toBe('c1');
-  });
-
-  it('ToolCallResult-shaped return passes through as-is', async () => {
-    result = createMCPackServer(makeConfig());
-
-    const callHandler = getHandler(result.server, 'tools/call');
-    const callResult = await callHandler(
-      {
-        method: 'tools/call',
-        params: { name: 'delete_account', arguments: { accountId: '123' } },
-      },
-      makeExtra('session-1'),
-    );
-
-    expect(callResult.content[0].text).toBe('deleted');
-  });
-
-  it('null/undefined return from handler becomes empty text content', async () => {
-    const tools: MCPackToolDefinition[] = [
-      {
-        name: 'null_tool',
-        description: 'Returns null',
-        inputSchema: { type: 'object', properties: {} },
-        handler: async () => null,
-      },
-    ];
-
-    result = createMCPackServer(makeConfig({ tools }));
-
-    const callHandler = getHandler(result.server, 'tools/call');
-    const callResult = await callHandler(
-      {
-        method: 'tools/call',
-        params: { name: 'null_tool', arguments: {} },
-      },
-      makeExtra('session-1'),
-    );
-
-    expect(callResult.content[0].text).toBe('');
-  });
-
-  it('unknown tool returns isError true with "Unknown tool: {name}"', async () => {
-    result = createMCPackServer(makeConfig());
-
-    const callHandler = getHandler(result.server, 'tools/call');
-    const callResult = await callHandler(
-      {
-        method: 'tools/call',
-        params: { name: 'nonexistent_tool', arguments: {} },
-      },
-      makeExtra('session-1'),
-    );
-
-    expect(callResult.isError).toBe(true);
-    expect(callResult.content[0].text).toBe('Unknown tool: nonexistent_tool');
-  });
-
-  it('handler throwing returns isError true with Tool failed message', async () => {
-    const tools: MCPackToolDefinition[] = [
-      {
-        name: 'error_tool',
-        description: 'Throws error',
-        inputSchema: { type: 'object', properties: {} },
-        handler: async () => {
-          throw new Error('connection refused');
-        },
-      },
-    ];
-
-    result = createMCPackServer(makeConfig({ tools }));
-
-    const callHandler = getHandler(result.server, 'tools/call');
-    const callResult = await callHandler(
-      {
-        method: 'tools/call',
-        params: { name: 'error_tool', arguments: {} },
-      },
-      makeExtra('session-1'),
-    );
-
-    expect(callResult.isError).toBe(true);
-    expect(callResult.content[0].text).toBe('Tool "error_tool" failed: connection refused');
-  });
-
-  it('duplicate tool names warn and last definition wins', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-    const tools: MCPackToolDefinition[] = [
-      {
-        name: 'dupe_tool',
-        description: 'First definition',
-        inputSchema: { type: 'object', properties: {} },
-        handler: async () => 'first',
-      },
-      {
-        name: 'dupe_tool',
-        description: 'Second definition',
-        inputSchema: { type: 'object', properties: {} },
-        handler: async () => 'second',
-      },
-    ];
-
-    result = createMCPackServer(makeConfig({ tools }));
-
-    expect(warnSpy).toHaveBeenCalledWith(
-      'MCPack: duplicate tool name "dupe_tool" in config.tools. Last definition wins.',
-    );
-
-    const callHandler = getHandler(result.server, 'tools/call');
-    const callResult = await callHandler(
-      {
-        method: 'tools/call',
-        params: { name: 'dupe_tool', arguments: {} },
-      },
-      makeExtra('session-1'),
-    );
-
-    expect(callResult.content[0].text).toBe('second');
-    warnSpy.mockRestore();
-  });
-
-  it('empty config.tools throws Error', () => {
-    expect(() => createMCPackServer(makeConfig({ tools: [] }))).toThrow(
-      'MCPack: config.tools is empty',
-    );
-  });
-
-  it('missing config.name throws Error', () => {
-    expect(() => createMCPackServer(makeConfig({ name: '' }))).toThrow(
-      'MCPack: config.name is required',
-    );
-  });
-
-  it('missing config.version throws Error', () => {
-    expect(() => createMCPackServer(makeConfig({ version: '' }))).toThrow(
-      'MCPack: config.version is required',
-    );
-  });
-
-  it('role check blocks disallowed tools', async () => {
-    const config = makeConfig({
-      defaultRole: 'reader',
-      roles: { reader: ['list_payments'] },
+  it('accepts supported per-request metadata and needs no session ID', async () => {
+    built = createMCPackServer(config());
+    const response = await request(built, 'tools/call', {
+      name: 'search_tools',
+      arguments: { query: 'customer' },
     });
 
-    result = createMCPackServer(config);
-
-    const callHandler = getHandler(result.server, 'tools/call');
-    const callResult = await callHandler(
-      {
-        method: 'tools/call',
-        params: { name: 'delete_account', arguments: { accountId: '123' } },
-      },
-      makeExtra('session-1'),
-    );
-
-    expect(callResult.isError).toBe(true);
-    expect(callResult.content[0].text).toBe('Unknown tool: delete_account');
+    expect(response.status).toBe(200);
+    expect(response.body.result.resultType).toBe('complete');
+    expect(response.body.result._meta[SERVER_INFO_META_KEY]).toBeDefined();
+    const search = JSON.parse(response.body.result.content[0].text);
+    expect(search.session_id).toBeUndefined();
+    expect(search.tools.every((tool: any) => tool.schema)).toBe(true);
   });
 
-  it('successful tools/call marks tool as loaded in session', async () => {
-    result = createMCPackServer(makeConfig());
+  it('rejects an unsupported protocol version', async () => {
+    built = createMCPackServer(config());
+    const response = await request(built, 'tools/list', {}, {
+      ...validMeta,
+      [PROTOCOL_VERSION_META_KEY]: '2099-01-01',
+    });
 
-    const callHandler = getHandler(result.server, 'tools/call');
-
-    // First, search to create a session
-    await callHandler(
-      {
-        method: 'tools/call',
-        params: { name: 'search_tools', arguments: { query: 'customer' } },
-      },
-      makeExtra('session-load'),
-    );
-
-    // Then call a tool directly
-    await callHandler(
-      {
-        method: 'tools/call',
-        params: { name: 'create_customer', arguments: { name: 'Alice' } },
-      },
-      makeExtra('session-load'),
-    );
-
-    // Search again -- the tool should now be marked as loaded
-    const searchResult = await callHandler(
-      {
-        method: 'tools/call',
-        params: { name: 'search_tools', arguments: { query: 'customer' } },
-      },
-      makeExtra('session-load'),
-    );
-
-    const response = JSON.parse(searchResult.content[0].text);
-    const customerTool = response.tools.find((t: any) => t.name === 'create_customer');
-    expect(customerTool?.loaded).toBe(true);
+    expect(response.body.error.code).toBe(-32022);
+    expect(response.body.error.data).toEqual({
+      requested: '2099-01-01',
+      supported: ['2026-07-28'],
+    });
   });
 
-  it('stats() returns correct session and tool counts', async () => {
-    result = createMCPackServer(makeConfig());
+  it('rejects missing required request metadata', async () => {
+    built = createMCPackServer(config());
+    const missingVersion = await request(built, 'tools/list', {}, {
+      [CLIENT_CAPABILITIES_META_KEY]: {},
+    });
+    const missingCapabilities = await request(built, 'tools/list', {}, {
+      [PROTOCOL_VERSION_META_KEY]: '2026-07-28',
+    });
 
-    expect(result.handle.stats().tools).toBe(3);
-    expect(result.handle.stats().sessions).toBe(0);
-
-    // Trigger a search to create a session
-    const callHandler = getHandler(result.server, 'tools/call');
-    await callHandler(
-      {
-        method: 'tools/call',
-        params: { name: 'search_tools', arguments: { query: 'customer' } },
-      },
-      makeExtra('new-session'),
-    );
-
-    expect(result.handle.stats().sessions).toBe(1);
+    expect(missingVersion.body.error).toBeDefined();
+    expect(missingCapabilities.body.error).toBeDefined();
   });
 
-  it('destroy() cleans up session registry', async () => {
-    result = createMCPackServer(makeConfig());
-
-    const callHandler = getHandler(result.server, 'tools/call');
-    await callHandler(
-      {
-        method: 'tools/call',
-        params: { name: 'search_tools', arguments: { query: 'customer' } },
-      },
-      makeExtra('session-cleanup'),
-    );
-
-    expect(result.handle.stats().sessions).toBe(1);
-    result.handle.destroy();
-    expect(result.handle.stats().sessions).toBe(0);
-    result = undefined; // already destroyed
-  });
-
-  it('warns when defaultRole is not defined in roles config', () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-    result = createMCPackServer(makeConfig({
-      defaultRole: 'nonexistent',
-      roles: { admin: '*' },
+  it('clientInfo is attribution only and cannot grant authorization', async () => {
+    built = createMCPackServer(config({
+      defaultRole: 'reader',
+      roles: { reader: ['list_payments'], admin: '*' },
     }));
-
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('defaultRole "nonexistent" is not defined in roles config'),
+    const response = await request(
+      built,
+      'tools/call',
+      { name: 'delete_account', arguments: {} },
+      {
+        ...validMeta,
+        [CLIENT_INFO_META_KEY]: { name: 'admin', version: '1.0.0' },
+      },
     );
-    warnSpy.mockRestore();
+
+    expect(response.body.result.isError).toBe(true);
+    expect(response.body.result.content[0].text).toBe(
+      'Unknown tool: delete_account',
+    );
   });
 
-  it('session ID falls back to __stdio__ when absent from extra', async () => {
-    let capturedCtx: MCPackHandlerContext | undefined;
-    const tools: MCPackToolDefinition[] = [
-      {
-        name: 'sid_tool',
-        description: 'Captures session ID',
-        inputSchema: { type: 'object', properties: {} },
-        handler: async (_args, ctx) => {
-          capturedCtx = ctx;
-          return 'ok';
-        },
+  it('identical searches are equivalent regardless of previous calls', async () => {
+    built = createMCPackServer(config());
+    const search = () => request(built!, 'tools/call', {
+      name: 'search_tools',
+      arguments: { query: 'customer' },
+    });
+
+    const first = await search();
+    await request(built, 'tools/call', {
+      name: 'create_customer',
+      arguments: { name: 'Alice' },
+    });
+    const second = await search();
+
+    expect(second.body.result).toEqual(first.body.result);
+  });
+
+  it('preserves existing role filtering in stateless search', async () => {
+    built = createMCPackServer(config({
+      defaultRole: 'reader',
+      roles: { reader: ['list_payments'] },
+    }));
+    const response = await request(built, 'tools/call', {
+      name: 'search_tools',
+      arguments: { query: 'customer payments account', limit: 10 },
+    });
+    const search = JSON.parse(response.body.result.content[0].text);
+
+    expect(search.total_available).toBe(1);
+    expect(search.tools.map((tool: any) => tool.name)).toEqual(['list_payments']);
+  });
+
+  it('passes request-scoped protocol context without a session field', async () => {
+    let captured: MCPackHandlerContext | undefined;
+    const tool: MCPackToolDefinition = {
+      name: 'context',
+      description: 'Capture context',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async (_args, context) => {
+        captured = context;
+        return { content: [{ type: 'text', text: 'ok' }], _meta: { upstream: true } };
       },
-    ];
+    };
+    built = createMCPackServer(config({ tools: [tool] }));
+    const response = await request(built, 'tools/call', {
+      name: 'context', arguments: {},
+    });
 
-    result = createMCPackServer(makeConfig({ tools }));
-
-    const callHandler = getHandler(result.server, 'tools/call');
-    await callHandler(
-      {
-        method: 'tools/call',
-        params: { name: 'sid_tool', arguments: {} },
-      },
-      makeExtra(), // no sessionId
-    );
-
-    expect(capturedCtx!.sessionId).toBe('__stdio__');
+    expect(captured).toMatchObject({
+      toolName: 'context', protocolVersion: '2026-07-28', clientCapabilities: {},
+      clientInfo: { name: 'test-client', version: '1.0.0' },
+    });
+    expect(captured).not.toHaveProperty('sessionId');
+    expect(response.body.result._meta.upstream).toBe(true);
+    expect(response.body.result.resultType).toBe('complete');
   });
 });

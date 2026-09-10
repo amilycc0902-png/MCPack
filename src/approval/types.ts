@@ -3,6 +3,8 @@ export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'executed';
 export interface Approval {
   approvalId: string;
   requestId: string;
+  /** Immutable original MCP request correlation, when created through MCP. */
+  mcpRequestId?: string | number;
   status: ApprovalStatus;
   requesterUserId: string;
   requesterRole: string;

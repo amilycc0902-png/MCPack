@@ -54,6 +54,7 @@ export class ToolCallService {
       await this.options.audit.emit({
         eventType: 'tool_call_received',
         requestId: requestContext.requestId,
+        mcpRequestId: requestContext.mcpRequestId,
         userId: requestContext.userId,
         userRole: requestContext.userRole,
         agentId: requestContext.agentId,
@@ -67,6 +68,7 @@ export class ToolCallService {
       await this.options.audit.emit({
         eventType: 'policy_decided',
         requestId: requestContext.requestId,
+        mcpRequestId: requestContext.mcpRequestId,
         userId: requestContext.userId,
         userRole: requestContext.userRole,
         agentId: requestContext.agentId,
@@ -80,6 +82,7 @@ export class ToolCallService {
         await this.options.audit.emit({
           eventType: 'tool_call_denied',
           requestId: requestContext.requestId,
+          mcpRequestId: requestContext.mcpRequestId,
           userId: requestContext.userId,
           userRole: requestContext.userRole,
           agentId: requestContext.agentId,
@@ -119,6 +122,7 @@ export class ToolCallService {
       await this.options.audit.emit({
         eventType: 'tool_execution_started',
         requestId: requestContext.requestId,
+        mcpRequestId: requestContext.mcpRequestId,
         userId: requestContext.userId,
         userRole: requestContext.userRole,
         agentId: requestContext.agentId,
@@ -134,6 +138,7 @@ export class ToolCallService {
       await this.options.audit.emit({
         eventType: 'tool_execution_succeeded',
         requestId: requestContext.requestId,
+        mcpRequestId: requestContext.mcpRequestId,
         userId: requestContext.userId,
         userRole: requestContext.userRole,
         agentId: requestContext.agentId,
@@ -181,6 +186,7 @@ export class ToolCallService {
         await this.options.audit.emit({
           eventType: 'tool_execution_failed',
           requestId: requestContext.requestId,
+          mcpRequestId: requestContext.mcpRequestId,
           userId: requestContext.userId,
           userRole: requestContext.userRole,
           agentId: requestContext.agentId,
