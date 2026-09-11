@@ -2,7 +2,7 @@
 
 ## Policy Gateway POC
 
-The Policy Gateway POC currently provides the local scaffold, a health endpoint, a transport-neutral deterministic policy evaluator, guarded mock execution, an in-memory human approval workflow, and replaceable sanitized lifecycle auditing. Real MCP integration and output redaction are not implemented yet.
+The Policy Gateway POC provides a health endpoint, a transport-neutral deterministic policy evaluator, guarded execution, an in-memory human approval workflow, structured sanitization, and replaceable lifecycle auditing. M1–M5 remain locally runnable with mocks; the optional M6 pilot adds one real read-only GitHub MCP issue-search integration (see below).
 
 The policy evaluator supports subject matching, exact or wildcard tool matching, deterministic argument equality conditions, priority ordering, safe effect precedence for ties, and default denial. Sample policies live in `src/policy/sample-policies.ts`.
 
@@ -353,3 +353,91 @@ See the [full specification](spec/mcpack-spec-v1.md) for protocol details, archi
 ## License
 
 MIT
+## M6: optional real read-only MCP integration
+
+The offline commands and local server retain their existing behavior. To run
+`tickets.search` against GitHub's official MCP `search_issues`, use Node.js 22+
+and set `GITHUB_PERSONAL_ACCESS_TOKEN` in your process environment to an expiring
+public-read-only PAT. A classic PAT with **no scopes** can read public repositories;
+do not grant `repo` or other write/private access for this demo. A fine-grained PAT
+limited to public repository read access is another option. Never paste credentials
+into tool arguments or commit them. `.env.example` contains placeholders only;
+the application does not automatically load `.env` files.
+
+```sh
+npm ci
+npm run demo:mcp:real-pilot
+```
+
+The optional command searches public issues in `github/github-mcp-server`, prints
+only success/failure, and exits. Missing credentials or incompatible discovery
+fail closed; there is no fallback to mocked tickets. `REAL_MCP_TIMEOUT_MS` defaults
+to 5000 (integer 1–60000). Refunds remain mocked and approval-gated in the pilot
+composition. The pilot can be injected into the existing Fastify factory using
+its existing service options; `npm start` remains the offline server.
+
+```sh
+npm run typecheck
+npm test
+npm run demo:mcp:e2e
+npm run test:mcp:integration
+```
+
+The integration tests use a fake MCP transport and need no network or credentials.
+See [M6 setup, security boundaries, and limitations](docs/real-mcp-pilot-plan.md).
+
+The opt-in live demo prints exactly one fixed failure stage on stderr and exits 1:
+`network_or_tls_failed`, `upstream_http_401`, `upstream_http_403`,
+`upstream_http_404`, `upstream_http_other`, `mcp_handshake_failed`,
+`capability_validation_failed`,
+`tool_discovery_failed`, `tool_annotation_failed`,
+`unsupported_schema_dialect`, `unsupported_schema_keyword`,
+`unsupported_schema_value_type`, `query_property_missing`,
+`query_property_not_string`, `query_not_required`, `fixture_validation_failed`,
+`schema_validator_construction_failed`, `schema_validation_other`,
+`policy_denied`, `tool_execution_failed`, or `result_validation_failed`.
+It never prints upstream errors, headers, tokens, payloads, schemas, issue text,
+audit contents, or stacks. Success requires status 200, decision `allow`, and
+exactly one observed `tickets.search` executor completion (`executed === true`). Gateway errors stay generic;
+the diagnostic observer is supplied only by the opt-in demo.
+
+For `unsupported_schema_keyword`, the demo prints
+`unsupported_schema_keyword=<safe-keyword>` only for the first unsupported key
+encountered in a depth-first traversal of schema objects. The name must match
+`^\$?[A-Za-z][A-Za-z0-9_-]{0,31}$` in full. Unsafe keys report only
+`unsupported_keyword_other`; later keys are never used as a fallback. Property
+names inside `properties` and schema values are never diagnostic candidates.
+Only names originating from this schema traversal can be formatted. No schema
+support or production error behavior changes.
+
+When the first unsupported key is `x-mcp-header`, the demo instead prints exactly
+two lines: `x_mcp_header_location=<category>` and
+`x_mcp_header_value_type=<type>`. Locations are limited to `schema_root`,
+`query_property_schema`, `other_property_schema`, `array_item_schema`, and
+`nested_schema`; types are limited to `boolean`, `string`, `number`, `object`,
+`array`, and `null`. No value or property name is printed. Rejected cases retain
+this diagnostic and production errors remain generic.
+
+`x-mcp-header` is admitted only directly on a non-query root property schema,
+with a string fully matching `^[A-Za-z0-9-]{1,64}$`. Only that annotation is
+removed from the cloned schema before local validation; the property and
+`required` array remain intact. Its value never controls any HTTP header.
+Root, query, array-item, deeper nested, and invalid-value occurrences still fail.
+Caller input remains exactly `{ query: string }`. A required additional property
+still fails startup rather than being omitted or populated from a header.
+
+Connection diagnostics use HTTP status only: 401, 403, and 404 have explicit
+categories; every other HTTP failure maps to `upstream_http_other`. Fetch rejection
+maps to `network_or_tls_failed`; a successful HTTP exchange followed by a failed
+MCP handshake maps to `mcp_handshake_failed`. A missing or empty token reports
+`environment_configuration_failed` without making a network request.
+Other local preflight failures still use
+the handshake category. A PAT accepted by GitHub's REST API does not establish
+access to the separate hosted MCP endpoint.
+
+Schema diagnostics reveal no schema, schema values, descriptions, or property
+names. The bounded vocabulary still rejects unknown keywords and references.
+No new keyword was admitted speculatively for the hosted schema. Existing default
+annotations are now constrained to bounded scalar values or bounded scalar arrays;
+they are never applied to arguments. Use the reported category to narrow a live
+compatibility failure without weakening validation.

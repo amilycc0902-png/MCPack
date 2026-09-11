@@ -2,6 +2,21 @@
 
 ## Purpose and scope
 
+### Authorized M6 extension
+
+M1–M5 remain the offline POC described below. M6 adds one opt-in real, read-only
+integration: `tickets.search` routes to GitHub's official MCP `search_issues`;
+`refunds.execute` and `customers.get` remain simulated. This is the sole exception
+to the original remote-transport exclusion. No real writes or additional servers
+are authorized. The transport-neutral policy, approval, audit, Fastify routes,
+and downstream stateless MCP protocol remain unchanged.
+
+See [the M6 integration guide](real-mcp-pilot-plan.md) for the implemented scope,
+upstream compatibility boundary, environment-only credentials, schema restrictions,
+security limitations, and verification commands. Runtime is Node.js 22+ and strict
+TypeScript. The existing MCP client SDK and JSON Schema validator are promoted
+from development to runtime dependencies; no new package is introduced.
+
 This plan turns the Policy Gateway PRD into an implementation sequence for the existing `@llvs/mcpack` TypeScript library. It intentionally distinguishes:
 
 - the **first demonstrable POC**, which proves one complete governed tool-call flow with local, in-memory components; and

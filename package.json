@@ -31,17 +31,19 @@
     "harness": "npx tsx test/harness/stripe-harness.ts",
     "demo": "tsx src/demo/audit-demo.ts",
     "demo:mcp": "tsx src/demo/mcp-adapter-demo.ts",
-    "demo:mcp:e2e": "tsx src/demo/mcp-e2e-demo.ts"
+    "demo:mcp:e2e": "tsx src/demo/mcp-e2e-demo.ts",
+    "demo:mcp:real-pilot": "tsx src/demo/real-mcp-pilot.ts",
+    "test:mcp:integration": "vitest run tests/tools/mcp-tool-executor.test.ts tests/tools/upstream-schema.test.ts tests/mcp/real-mcp-pilot.test.ts tests/mcp/real-mcp-diagnostics.test.ts"
   },
   "dependencies": {
+    "@cfworker/json-schema": "^4.1.1",
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "@modelcontextprotocol/server": "2.0.0",
     "fastify": "^5.12.3",
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@cfworker/json-schema": "^4.1.1",
     "@eslint/js": "^9.0.0",
-    "@modelcontextprotocol/sdk": "^1.27.1",
     "@types/node": "^25.5.0",
     "@vitest/coverage-v8": "^4.1.0",
     "eslint": "^9.0.0",
